@@ -18,11 +18,14 @@ Module.register("WB-weather", {
 		language: config.language, // what language to localize for
 		daysToForecast: 4, // how many days to include in upcoming forecast (including today)
 
-		updateInterval: null,
+		updateInterval: 30 * 60 * 1000, // Refresh at most every 30 minutes by default
 		initialLoadDelay: 1000
 	},
 
 	fetchTimer: null,
+	nextFetchAt: null, // Absolute deadline preserved while hidden
+	fetchInProgress: false,
+	suspended: false,
 	provider: null,
 	weather: null,
 	error: null,
@@ -85,25 +88,50 @@ Module.register("WB-weather", {
 	},
 
 	suspend: function() {
-		Log.info(`Suspending module: ${this.name}`);
+		Log.debug(`Suspending module: ${this.name}`);
+		this.suspended = true;
 		clearTimeout(this.fetchTimer);
+		this.fetchTimer = null;
+		// Keep nextFetchAt and the current weather data for the next page visit.
 	},
 
 	resume: function() {
-		Log.info(`Resuming module: ${this.name}`);
-		clearTimeout(this.fetchTimer);
-		this.scheduleUpdate(this.config.initialLoadDelay);
+		Log.debug(`Resuming module: ${this.name}`);
+		this.suspended = false;
+
+		// A request started on the previous page may still be in flight.
+		// Its response will schedule the next refresh.
+		if (this.provider === null || this.fetchInProgress) {
+			return;
+		}
+
+		// Do not retry permanent provider errors on every page change.
+		if (this.provider.error !== null && !this.provider.error.isTemporary) {
+			return;
+		}
+
+		const remaining = this.nextFetchAt === null
+			? this.config.initialLoadDelay
+			: Math.max(0, this.nextFetchAt - Date.now());
+		this.scheduleUpdate(remaining);
 	},
 
 	// gets called by the weather provider when it has an update available
 	updateAvailable: function() {
 		// Only schedule another fetch if we succeeded in getting the weather or if the error we encountered is temporary
+		this.fetchInProgress = false;
+
 		if (this.provider.error === null) {
-			// No errors, we successfully got the weather!
+			// Keep the successful response in memory until the next refresh.
 			this.scheduleUpdate(this.provider.updateInterval);
 		} else if (this.provider.error.isTemporary) {
-			// We got an error, but we might recover from it if we retry the request again later
-			this.scheduleUpdate(this.provider.error.retryDelay);
+			// Retry temporary errors, but never more frequently than updateInterval.
+			this.scheduleUpdate(Math.max(this.provider.updateInterval, this.provider.error.retryDelay || 0));
+		} else {
+			// A permanent error must not trigger a fetch when the page reappears.
+			this.nextFetchAt = null;
+			clearTimeout(this.fetchTimer);
+			this.fetchTimer = null;
 		}
 
 		// we should update the dom with the new update
@@ -113,16 +141,40 @@ Module.register("WB-weather", {
 	},
 
 	scheduleUpdate: function(delay=null) {
-		var nextFetch = this.provider.updateInterval;
+		let nextFetch = this.provider.updateInterval;
 		if (delay !== null && delay >= 0) {
 			nextFetch = delay;
 		}
 
+		// Save an absolute deadline so a page change cannot reset the interval.
+		this.nextFetchAt = Date.now() + nextFetch;
+		clearTimeout(this.fetchTimer);
+		this.fetchTimer = null;
+
+		// The next page visit will use the remaining delay.
+		if (this.suspended || this.fetchInProgress) {
+			return;
+		}
+
 		this.fetchTimer = setTimeout(() => {
-			if (this.provider.usesNodeHelper) {
-				this.sendSocketNotification("FETCH_DATA", {providerName: this.provider.name, data: this.provider.dataForHelper()});
-			} else {
-				this.provider.fetchWeather();
+			this.fetchTimer = null;
+			if (this.suspended || this.fetchInProgress) {
+				return;
+			}
+
+			this.nextFetchAt = null;
+			this.fetchInProgress = true;
+			Log.info(`WB-weather: fetching weather via ${this.provider.name}`);
+
+			try {
+				if (this.provider.usesNodeHelper) {
+					this.sendSocketNotification("FETCH_DATA", {providerName: this.provider.name, data: this.provider.dataForHelper()});
+				} else {
+					this.provider.fetchWeather();
+				}
+			} catch (error) {
+				this.fetchInProgress = false;
+				this.provider.resolveWithTemporaryError(error.message);
 			}
 		}, nextFetch);
 	},
