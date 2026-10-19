@@ -1,6 +1,56 @@
 # Module: WB-weather
 The `WB-weather` module was designed to complement the `WallberryTheme` module and displays the current weather and forecast. It uses [OpenWeatherMap](https://openweathermap.org/) as its default weather provider, but it can be easily configured to use other weather providers instead.
 
+## Maintained fork: One Call 3.0 and page-safe weather refresh
+
+This fork uses the **OpenWeatherMap One Call 3.0** endpoint (`/data/3.0/onecall`). Your OpenWeather subscription must include access to One Call 3.0. The API key is not part of this repository.
+
+`WB-weather` now retains weather data and the next scheduled refresh time **in memory**, even when a page controller such as [MMM-pages](https://github.com/edward-shen/MMM-pages) hides and shows it repeatedly:
+
+- On startup the first request still starts after `initialLoadDelay` (default: 1 second).
+- On success, a subsequent API request is scheduled after `updateInterval`, which now defaults to **30 minutes**.
+- On a page change, the timer is paused but its absolute deadline is preserved. Returning to the page shows cached data immediately, rather than fetching again.
+- If that deadline passes while the module is hidden, it makes **one** overdue request when shown again.
+- If the previous request has not finished, showing the module does not start a duplicate request.
+- On temporary errors, retries wait at least the configured `updateInterval` (or longer if the provider requests it). Permanent errors do not trigger further requests on page changes.
+- Every actual request attempt produces a `WB-weather: fetching weather via ...` INFO log entry. Repeated page switches use DEBUG logging.
+
+This is an **in-memory cache only**, scoped to a single browser/Electron instance. It does not survive a full MagicMirror restart or a browser reload; each independently running client makes its own API requests. It does not cache across computers or persist API responses to disk.
+
+### Example: one refresh every 30 minutes
+
+```js
+{
+    module: "WallberryTheme/WB-weather",
+    position: "bottom_center",
+    classes: "page0", // optional: assign to an MMM-pages page
+    config: {
+        apiKey: process.env.OPENWEATHER_API_KEY,
+        latitude: 55.6408418,
+        longitude: 13.2050282,
+        updateInterval: 30 * 60 * 1000
+    }
+}
+```
+
+When using `MMM-pages`, keep the weather module assigned to the appropriate page; this fork automatically retains its refresh deadline while hidden. There is no need to add a second weather module or a separate caching service.
+
+Use the browser's Network tab and filter for `onecall` to verify actual API traffic. With one continuously active client and a healthy API, the normal steady-state rate is roughly **48 calls per day** at a 30-minute interval, plus an initial request after startup or full reload. External clients, restarts, and manual refreshes may add requests.
+
+For diagnostics, look for `WB-weather: fetching weather via openweathermap` in the MagicMirror Electron/client logs. Requests are made by the provider in the client, so they may **not** appear in the `systemd` server journal.
+
+### Regression tests
+
+From the repository root, run:
+
+```bash
+node --test WB-weather/tests/scheduling.test.js
+```
+
+These tests simulate page changes and controlled timers; they do not contact OpenWeatherMap.
+
+
+
 ## Using the module
 
 To use this module, add it to the modules array in the `config/config.js` file:
@@ -33,7 +83,7 @@ These general options should honored the same across all weather providers. Spec
 | `units`                     | config.units       |String      | What temperature units to use. **Possible values:** `"imperial"`, `"metric"`, `"standard"`<br>
 | `language`                  | config.language    |String      | What language to use. <br><br> **Possible values:** `en`, `nl`, `ru`, etc...<br>
 | `daysToForecast`            | 4                  |Number      | How many days to forecast in weekly forecast. <br><br> **Possible values:** Varies by provider. <br>
-| `updateInterval`            | `600000` (10 minutes)|Number    | How often to fetch new weather data (Milliseconds). Limits vary by provider.
+| `updateInterval`            | `1800000` (30 minutes in this fork)|Number    | Minimum time between successful fetches (milliseconds); also a floor for temporary-error retries. OpenWeatherMap enforces a 10-minute minimum.
 
 -------------------------------
 
